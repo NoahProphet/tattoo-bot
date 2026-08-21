@@ -1,0 +1,29 @@
+# Block direct web access to everything in this folder except webhook.php.
+# config.php, db.php, telegram.php, state.php, schema.sql, README.md
+# are only ever used via `require`/import — nobody should be able to
+# open them directly in a browser.
+
+<IfModule mod_authz_core.c>
+    # Apache 2.4 / LiteSpeed (current) syntax
+    <FilesMatch "\.(php|sql|md|log|env)$">
+        Require all denied
+    </FilesMatch>
+    <Files "webhook.php">
+        Require all granted
+    </Files>
+</IfModule>
+
+<IfModule !mod_authz_core.c>
+    # Fallback for older Apache 2.2-style syntax
+    <FilesMatch "\.(php|sql|md|log|env)$">
+        Order allow,deny
+        Deny from all
+    </FilesMatch>
+    <Files "webhook.php">
+        Order allow,deny
+        Allow from all
+    </Files>
+</IfModule>
+
+# Don't let anyone list the folder contents either
+Options -Indexes
