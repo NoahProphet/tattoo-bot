@@ -25,5 +25,6 @@ return [
     ],
 
     // Used only for displaying dates nicely; doesn't affect what's stored.
-    'timezone' => 'Europe/Berlin',
+    // Iran has used a fixed UTC+03:30 offset (no DST) since 2022.
+    'timezone' => 'Asia/Tehran',
 ];

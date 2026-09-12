@@ -6,9 +6,11 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/db.php';
-require __DIR__ . '/telegram.php';
-require __DIR__ . '/state.php';
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/telegram.php';
+require_once __DIR__ . '/state.php';
+require_once __DIR__ . '/jalali.php';
+require_once __DIR__ . '/lang.php';
 
 $config = require __DIR__ . '/config.php';
 date_default_timezone_set($config['timezone'] ?? 'UTC');
@@ -44,6 +46,29 @@ http_response_code(200);
 exit;
 
 // ==========================================================================
+// Small helpers
+// ==========================================================================
+
+/** A near-future example date shown in prompts/errors, so it's always valid. */
+function jalaliDateExample(): string
+{
+    return formatJalali((new DateTime('+7 days'))->format('Y-m-d'), 'short');
+}
+
+/** A fixed example time shown in prompts/errors, in Persian digits. */
+function jalaliTimeExample(): string
+{
+    return toPersianDigits('14:30');
+}
+
+/** Accept a handful of ways a client might say "no description, thanks". */
+function isSkipWord(string $text): bool
+{
+    $normalized = mb_strtolower(normalizeDigits(trim($text)), 'UTF-8');
+    return in_array($normalized, ['skip', 'رد شدن', 'رد کردن', 'بدون توضیح', 'ندارد', '-'], true);
+}
+
+// ==========================================================================
 // Message handling (text commands + step-by-step booking flow)
 // ==========================================================================
 
@@ -60,25 +85,19 @@ function handleMessage(array $message): void
 
     if ($text === '/start') {
         resetState($telegramId);
-        tgSendMessage(
-            $chatId,
-            "👋 Welcome to the studio's booking assistant!\n\n" .
-            "• /book — request a tattoo appointment\n" .
-            "• /myappointments — check the status of your requests\n" .
-            "• /cancel — cancel whatever you're doing"
-        );
+        tgSendMessage($chatId, t('start_welcome'));
         return;
     }
 
     if ($text === '/cancel') {
         resetState($telegramId);
-        tgSendMessage($chatId, 'Okay, cancelled. Send /book whenever you want to start again.');
+        tgSendMessage($chatId, t('cancel_done'));
         return;
     }
 
     if ($text === '/book') {
         saveState($telegramId, ['username' => $username, 'step' => 'awaiting_date']);
-        tgSendMessage($chatId, "Let's book your tattoo session! 🖋️\n\nWhat date would you like? (format: YYYY-MM-DD)");
+        tgSendMessage($chatId, t('book_ask_date', ['example' => jalaliDateExample()]));
         return;
     }
 
@@ -100,41 +119,39 @@ function handleMessage(array $message): void
             handleDescInput($chatId, $telegramId, $username, $text, $state);
             break;
         default:
-            tgSendMessage($chatId, "I didn't quite get that. Send /book to request an appointment.");
+            tgSendMessage($chatId, t('fallback_unknown'));
     }
 }
 
 function handleDateInput(int $chatId, int $telegramId, ?string $username, string $text): void
 {
-    $date = DateTime::createFromFormat('Y-m-d', $text);
-    $errors = DateTime::getLastErrors();
+    $gregorianDate = parseJalaliDate($text);
 
-    if (!$date || ($errors && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))) {
-        tgSendMessage($chatId, "That doesn't look like a valid date. Please use the format YYYY-MM-DD (e.g. 2026-09-15).");
+    if ($gregorianDate === null) {
+        tgSendMessage($chatId, t('date_invalid', ['example' => jalaliDateExample()]));
         return;
     }
 
     $today = new DateTime('today');
-    if ($date < $today) {
-        tgSendMessage($chatId, 'That date is in the past 🙂 Please choose a future date (YYYY-MM-DD).');
+    if (new DateTime($gregorianDate) < $today) {
+        tgSendMessage($chatId, t('date_past'));
         return;
     }
 
     saveState($telegramId, [
         'username'  => $username,
         'step'      => 'awaiting_time',
-        'temp_date' => $date->format('Y-m-d'),
+        'temp_date' => $gregorianDate,
     ]);
-    tgSendMessage($chatId, 'Great. What time works for you? (format: HH:MM, 24h — e.g. 14:30)');
+    tgSendMessage($chatId, t('book_ask_time', ['example' => jalaliTimeExample()]));
 }
 
 function handleTimeInput(int $chatId, int $telegramId, ?string $username, string $text, array $state): void
 {
-    $time = DateTime::createFromFormat('H:i', $text);
-    $errors = DateTime::getLastErrors();
+    $time = parsePersianTime($text);
 
-    if (!$time || ($errors && ($errors['warning_count'] > 0 || $errors['error_count'] > 0))) {
-        tgSendMessage($chatId, "That doesn't look like a valid time. Please use the format HH:MM (e.g. 14:30).");
+    if ($time === null) {
+        tgSendMessage($chatId, t('time_invalid', ['example' => jalaliTimeExample()]));
         return;
     }
 
@@ -142,18 +159,14 @@ function handleTimeInput(int $chatId, int $telegramId, ?string $username, string
         'username'  => $username,
         'step'      => 'awaiting_desc',
         'temp_date' => $state['temp_date'],
-        'temp_time' => $time->format('H:i:s'),
+        'temp_time' => $time,
     ]);
-    tgSendMessage(
-        $chatId,
-        "Got it. Briefly describe the tattoo you'd like (style, size, placement).\n" .
-        "Send \"skip\" if you'd rather discuss it in person."
-    );
+    tgSendMessage($chatId, t('book_ask_desc'));
 }
 
 function handleDescInput(int $chatId, int $telegramId, ?string $username, string $text, array $state): void
 {
-    $desc = (strtolower($text) === 'skip') ? null : $text;
+    $desc = isSkipWord($text) ? null : $text;
 
     saveState($telegramId, [
         'username'  => $username,
@@ -163,18 +176,15 @@ function handleDescInput(int $chatId, int $telegramId, ?string $username, string
         'temp_desc' => $desc,
     ]);
 
-    $dateFmt = (new DateTime($state['temp_date']))->format('D, d M Y');
-    $timeFmt = substr($state['temp_time'], 0, 5);
-    $descText = $desc ? htmlspecialchars($desc) : '<i>Not specified</i>';
+    $dateFmt = formatJalali($state['temp_date'], 'long');
+    $timeFmt = toPersianDigits(substr($state['temp_time'], 0, 5));
+    $descText = $desc ? htmlspecialchars($desc) : '<i>' . t('confirm_desc_none') . '</i>';
 
-    $summary = "Please confirm your request:\n\n" .
-        "📅 <b>Date:</b> {$dateFmt}\n" .
-        "⏰ <b>Time:</b> {$timeFmt}\n" .
-        "📝 <b>Description:</b> {$descText}";
+    $summary = t('confirm_summary', ['date' => $dateFmt, 'time' => $timeFmt, 'desc' => $descText]);
 
     $keyboard = tgInlineKeyboard([[
-        ['text' => '✅ Confirm', 'callback_data' => 'confirm_booking'],
-        ['text' => '❌ Cancel', 'callback_data' => 'cancel_booking'],
+        ['text' => t('btn_confirm'), 'callback_data' => 'confirm_booking'],
+        ['text' => t('btn_cancel_inline'), 'callback_data' => 'cancel_booking'],
     ]]);
 
     tgSendMessage($chatId, $summary, $keyboard);
@@ -188,19 +198,22 @@ function listAppointments(int $chatId, int $telegramId): void
     $rows = $stmt->fetchAll();
 
     if (!$rows) {
-        tgSendMessage($chatId, "You don't have any appointment requests yet. Send /book to create one.");
+        tgSendMessage($chatId, t('myappt_empty'));
         return;
     }
 
     $statusEmoji = ['pending' => '⏳', 'approved' => '✅', 'rejected' => '❌', 'cancelled' => '🚫'];
     $lines = [];
     foreach ($rows as $row) {
-        $emoji = $statusEmoji[$row['status']] ?? '';
-        $lines[] = "{$emoji} {$row['appointment_date']} at " . substr($row['appointment_time'], 0, 5) .
-            ' — ' . ucfirst($row['status']);
+        $lines[] = t('myappt_line', [
+            'emoji'  => $statusEmoji[$row['status']] ?? '',
+            'date'   => formatJalali($row['appointment_date'], 'short'),
+            'time'   => toPersianDigits(substr($row['appointment_time'], 0, 5)),
+            'status' => t('status_' . $row['status']),
+        ]);
     }
 
-    tgSendMessage($chatId, "Your recent requests:\n\n" . implode("\n", $lines));
+    tgSendMessage($chatId, t('myappt_header') . "\n\n" . implode("\n", $lines));
 }
 
 // ==========================================================================
@@ -224,15 +237,15 @@ function handleCallback(array $callback): void
 
     if ($data === 'cancel_booking') {
         resetState($fromId);
-        tgAnswerCallbackQuery($callbackId, 'Cancelled');
-        tgEditMessageText($chatId, $messageId, 'Booking request cancelled. Send /book to start a new one.');
+        tgAnswerCallbackQuery($callbackId, t('cancel_toast'));
+        tgEditMessageText($chatId, $messageId, t('cancel_edited'));
         return;
     }
 
     if (str_starts_with($data, 'approve_') || str_starts_with($data, 'reject_')) {
         // Only the configured artist account may approve/reject.
         if ($fromId !== (int) $config['artist_chat_id']) {
-            tgAnswerCallbackQuery($callbackId, 'Only the artist can do that.', true);
+            tgAnswerCallbackQuery($callbackId, t('artist_only'), true);
             return;
         }
         [$action, $appointmentIdRaw] = explode('_', $data, 2);
@@ -249,7 +262,7 @@ function confirmBooking(string $callbackId, int $chatId, int $telegramId, int $m
     $state = getState($telegramId);
 
     if ($state['step'] !== 'awaiting_confirm' || !$state['temp_date'] || !$state['temp_time']) {
-        tgAnswerCallbackQuery($callbackId, 'Nothing to confirm — send /book to start.', true);
+        tgAnswerCallbackQuery($callbackId, t('confirm_nothing'), true);
         return;
     }
 
@@ -269,21 +282,28 @@ function confirmBooking(string $callbackId, int $chatId, int $telegramId, int $m
 
     resetState($telegramId);
 
-    tgAnswerCallbackQuery($callbackId, 'Sent to the artist!');
-    tgEditMessageText($chatId, $messageId, "✅ Your request has been sent to the artist. You'll be notified as soon as it's reviewed.");
+    tgAnswerCallbackQuery($callbackId, t('confirm_toast'));
+    tgEditMessageText($chatId, $messageId, t('confirm_sent_client'));
 
     // Notify the artist with an Approve/Reject keyboard.
-    $dateFmt = (new DateTime($state['temp_date']))->format('D, d M Y');
-    $timeFmt = substr($state['temp_time'], 0, 5);
-    $descText = $state['temp_desc'] ? htmlspecialchars($state['temp_desc']) : '<i>Not specified</i>';
-    $userLabel = $state['username'] ? '@' . htmlspecialchars($state['username']) : "user #{$telegramId}";
+    $dateFmt = formatJalali($state['temp_date'], 'long');
+    $timeFmt = toPersianDigits(substr($state['temp_time'], 0, 5));
+    $descText = $state['temp_desc'] ? htmlspecialchars($state['temp_desc']) : '<i>' . t('confirm_desc_none') . '</i>';
+    $userLabel = $state['username']
+        ? '@' . htmlspecialchars($state['username'])
+        : t('artist_user_anon', ['id' => toPersianDigits((string) $telegramId)]);
 
-    $artistText = "🆕 <b>New appointment request</b> (#{$appointmentId})\n\n" .
-        "👤 {$userLabel}\n📅 {$dateFmt}\n⏰ {$timeFmt}\n📝 {$descText}";
+    $artistText = t('artist_notify', [
+        'id'   => toPersianDigits((string) $appointmentId),
+        'user' => $userLabel,
+        'date' => $dateFmt,
+        'time' => $timeFmt,
+        'desc' => $descText,
+    ]);
 
     $keyboard = tgInlineKeyboard([[
-        ['text' => '✅ Approve', 'callback_data' => "approve_{$appointmentId}"],
-        ['text' => '❌ Reject', 'callback_data' => "reject_{$appointmentId}"],
+        ['text' => t('btn_approve'), 'callback_data' => "approve_{$appointmentId}"],
+        ['text' => t('btn_reject'), 'callback_data' => "reject_{$appointmentId}"],
     ]]);
 
     tgSendMessage((int) $config['artist_chat_id'], $artistText, $keyboard);
@@ -297,12 +317,14 @@ function handleArtistDecision(string $callbackId, int $artistChatId, int $messag
     $appointment = $stmt->fetch();
 
     if (!$appointment) {
-        tgAnswerCallbackQuery($callbackId, 'Appointment not found.', true);
+        tgAnswerCallbackQuery($callbackId, t('decision_not_found'), true);
         return;
     }
 
     if ($appointment['status'] !== 'pending') {
-        tgAnswerCallbackQuery($callbackId, 'This request was already ' . $appointment['status'] . '.', true);
+        tgAnswerCallbackQuery($callbackId, t('decision_already', [
+            'status' => t('status_' . $appointment['status']),
+        ]), true);
         return;
     }
 
@@ -311,25 +333,27 @@ function handleArtistDecision(string $callbackId, int $artistChatId, int $messag
     $update = $pdo->prepare('UPDATE appointments SET status = ? WHERE id = ?');
     $update->execute([$newStatus, $appointmentId]);
 
-    $dateFmt = (new DateTime($appointment['appointment_date']))->format('D, d M Y');
-    $timeFmt = substr($appointment['appointment_time'], 0, 5);
-    $decisionLabel = $newStatus === 'approved' ? '✅ Approved' : '❌ Rejected';
+    $dateFmt = formatJalali($appointment['appointment_date'], 'long');
+    $timeFmt = toPersianDigits(substr($appointment['appointment_time'], 0, 5));
+    $decisionLabel = $newStatus === 'approved' ? t('decision_label_approved') : t('decision_label_rejected');
+    $toastText = $newStatus === 'approved' ? t('decision_toast_approved') : t('decision_toast_rejected');
 
-    tgAnswerCallbackQuery($callbackId, $decisionLabel);
+    tgAnswerCallbackQuery($callbackId, $toastText);
     tgEditMessageText(
         $artistChatId,
         $messageId,
-        "Request #{$appointmentId} — {$dateFmt} at {$timeFmt}\nStatus: {$decisionLabel}"
+        t('decision_edited', [
+            'id'       => toPersianDigits((string) $appointmentId),
+            'date'     => $dateFmt,
+            'time'     => $timeFmt,
+            'decision' => $decisionLabel,
+        ])
     );
 
     // Notify the client of the decision.
-    if ($newStatus === 'approved') {
-        $clientText = "🎉 Great news! Your tattoo appointment has been <b>approved</b>:\n\n" .
-            "📅 {$dateFmt}\n⏰ {$timeFmt}\n\nSee you then!";
-    } else {
-        $clientText = "😔 Unfortunately your requested slot ({$dateFmt} at {$timeFmt}) was <b>declined</b>. " .
-            'Send /book to try another date/time.';
-    }
+    $clientText = $newStatus === 'approved'
+        ? t('client_approved', ['date' => $dateFmt, 'time' => $timeFmt])
+        : t('client_rejected', ['date' => $dateFmt, 'time' => $timeFmt]);
 
     tgSendMessage((int) $appointment['telegram_id'], $clientText);
 }

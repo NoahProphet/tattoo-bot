@@ -1,5 +1,23 @@
 <?php
 
+require_once __DIR__ . '/jalali.php';
+
+/**
+ * Apply ensureRtl() (see jalali.php) to every line of a message before it
+ * goes to Telegram. This is the enforced backstop for RTL-safe output --
+ * templates in lang/fa.php should still lead with a Persian label where
+ * possible, but this guarantees a line never renders backwards even if a
+ * value (a bare @username, an English description) ends up first.
+ */
+function tgRtlSafe(string $text): string
+{
+    $lines = explode("\n", $text);
+    foreach ($lines as &$line) {
+        $line = ensureRtl($line);
+    }
+    return implode("\n", $lines);
+}
+
 function tgApiRequest(string $method, array $params = []): array
 {
     $config = require __DIR__ . '/config.php';
@@ -36,7 +54,7 @@ function tgSendMessage(int $chatId, string $text, ?array $replyMarkup = null): a
 {
     $params = [
         'chat_id'    => $chatId,
-        'text'       => $text,
+        'text'       => tgRtlSafe($text),
         'parse_mode' => 'HTML',
     ];
     if ($replyMarkup !== null) {
@@ -50,7 +68,7 @@ function tgEditMessageText(int $chatId, int $messageId, string $text, ?array $re
     $params = [
         'chat_id'    => $chatId,
         'message_id' => $messageId,
-        'text'       => $text,
+        'text'       => tgRtlSafe($text),
         'parse_mode' => 'HTML',
     ];
     if ($replyMarkup !== null) {
@@ -63,7 +81,7 @@ function tgAnswerCallbackQuery(string $callbackQueryId, string $text = '', bool 
 {
     return tgApiRequest('answerCallbackQuery', [
         'callback_query_id' => $callbackQueryId,
-        'text'              => $text,
+        'text'              => tgRtlSafe($text),
         'show_alert'        => $showAlert,
     ]);
 }

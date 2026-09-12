@@ -1,15 +1,21 @@
-# Tattoo Appointment Telegram Bot
+# ربات تلگرام نوبت‌دهی تتو (Tattoo Appointment Telegram Bot)
 
-A webhook-based PHP Telegram bot that lets clients request a tattoo
-appointment (date, time, description), sends the request to the tattoo
-artist for approval, and stores it in MySQL once a decision is made.
+A webhook-based PHP Telegram bot, in **Persian**, that lets clients request
+a tattoo appointment (date, time, description), sends the request to the
+tattoo artist for approval, and stores it in MySQL once a decision is made.
+Dates are shown and typed in the **Jalali (Shamsi)** calendar with Persian
+digits; the database still stores plain Gregorian dates underneath.
+
+See `PLAN.md` for the roadmap toward artist-published availability slots
+(the current version is "Phase 0": Persian/Jalali on top of the original
+free-text booking flow, with no scheduling changes yet).
 
 ## How it works
 
 1. Client sends `/book` → bot asks for date → time → description, step by step.
-2. Client confirms the summary (inline **Confirm / Cancel** buttons).
+2. Client confirms the summary (inline **تأیید / انصراف** buttons).
 3. The request is saved in `appointments` with status `pending`, and the
-   **artist** is notified in a separate chat with **Approve / Reject** buttons.
+   **artist** is notified in a separate chat with **تأیید / رد** buttons.
 4. When the artist taps a button, the row is updated to `approved` or
    `rejected`, and the client is notified automatically.
 5. Clients can check `/myappointments` at any time.
@@ -22,16 +28,23 @@ Conversation progress (which step each user is on) is kept in the
 | File                  | Purpose                                              |
 |------------------------|-------------------------------------------------------|
 | `webhook.php`          | Entry point Telegram calls — all bot logic lives here |
-| `telegram.php`         | Thin wrapper around the Telegram Bot API              |
+| `telegram.php`         | Thin wrapper around the Telegram Bot API (+ RTL-safe send) |
 | `db.php`                | PDO/MySQL connection helper                          |
 | `state.php`             | Per-user conversation state (get/save/reset)          |
-| `schema.sql`            | Creates `appointments` and `bot_states` tables        |
+| `jalali.php`            | Jalali↔Gregorian conversion, Persian digits, RTL line safety |
+| `lang.php`              | Loads `lang/fa.php` and provides the `t()` string helper |
+| `lang/fa.php`           | Every user-facing Persian string                     |
+| `schema.sql`            | Creates `appointments` and `bot_states` tables (dates stored in Gregorian) |
 | `config.example.php`    | Copy to `config.php` and fill in your values          |
 | `.htaccess`             | Blocks direct web access to everything except `webhook.php` |
+| `PLAN.md`               | Roadmap: artist-published availability slots, phased |
 
 ## Requirements
 
-- PHP 8.1+ with the `pdo_mysql` and `curl` extensions
+- PHP 8.1+ with the `pdo_mysql`, `curl`, and `mbstring` extensions (`mbstring`
+  is needed for correct Persian text handling; it's near-universal on shared
+  hosting, unlike `intl`, which is why the Jalali conversion is hand-rolled
+  instead of depending on it — see `PLAN.md` section 3.1)
 - MySQL 5.7+/MariaDB 10.3+
 - A public HTTPS URL (Telegram webhooks require HTTPS — a shared host,
   VPS with a reverse proxy, or a tunnel like `ngrok`/`cloudflared` for testing)
@@ -60,9 +73,10 @@ Conversation progress (which step each user is on) is kept in the
    `db` credentials. **Never commit `config.php`** — add it to `.gitignore`.
 
 5. **Upload** `webhook.php`, `telegram.php`, `db.php`, `state.php`,
+   `jalali.php`, `lang.php`, the `lang/` folder (with `fa.php` inside it),
    `config.php`, and **`.htaccess`** to your server, all in the same
-   directory. `.htaccess` is a hidden file — if your FTP client or File
-   Manager doesn't show it by default, look for a "show hidden files"
+   directory structure. `.htaccess` is a hidden file — if your FTP client or
+   File Manager doesn't show it by default, look for a "show hidden files"
    toggle. It blocks direct browser access to every file except
    `webhook.php`, so `config.php` and the rest can't be opened or
    downloaded by visiting their URL directly. (Verified: everything but
@@ -82,23 +96,30 @@ Conversation progress (which step each user is on) is kept in the
    ```
 
 7. **Test it.** Message your bot `/start`, then `/book`, and walk through
-   the flow. The artist's chat should get a request with Approve/Reject
-   buttons once you confirm.
+   the flow (the bot will ask for a date like `۱۴۰۵/۰۶/۲۵` and a time like
+   `۱۴:۳۰` — Latin digits work too, they're normalized automatically). The
+   artist's chat should get a request with تأیید/رد buttons once you confirm.
 
 ## Bot commands
 
 - `/start` — welcome message
-- `/book` — start a new appointment request
+- `/book` — start a new appointment request (date in Jalali, e.g. `1405/06/25`)
 - `/cancel` — abort whatever step you're on
 - `/myappointments` — list your last 10 requests and their status
 
 ## Notes & possible extensions
 
 - Dates/times aren't checked against existing bookings for double-booking —
-  add a query in `confirmBooking()` if the artist only takes one client per slot.
-- `description` is optional (client can type "skip").
+  see `PLAN.md` for the planned move to artist-published availability slots,
+  which closes this gap with an atomic reservation instead of a query added
+  here.
+- `description` is optional — the client can send "رد شدن" (or "skip").
 - Only the chat ID in `artist_chat_id` can approve/reject — a second artist
   would need either a second bot or a small `artists` table instead of a
   single ID in config.
 - All appointments (any status) stay in the table for history; nothing is
   deleted, so you can review rejected/past requests later.
+- All dates are stored in the database as plain Gregorian `DATE`/`TIME`
+  values; Jalali conversion happens only when displaying to, or parsing
+  input from, the user. Never edit `appointment_date`/`appointment_time`
+  by hand with a Jalali value — see `jalali.php` for the conversion helpers.
